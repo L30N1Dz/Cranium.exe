@@ -42,9 +42,15 @@ class JoystickView(QtWidgets.QWidget):
         painter.drawLine(self.width() // 2, 0, self.width() // 2, self.height())
         painter.drawLine(0, self.height() // 2, self.width(), self.height() // 2)
 
+        yogldd-codex/create-joystick_test_app-python-script
         # cursor position (cast to int for QPainter)
         x = int(self.position[0] / 1023 * self.width())
         y = int(self.position[1] / 1023 * self.height())
+
+        # cursor position
+        x = self.position[0] / 1023 * self.width()
+        y = self.position[1] / 1023 * self.height()
+        main
         painter.setPen(QtGui.QPen(QtGui.QColor("#0f0"), 2))
         size = 10
         painter.drawLine(x - size, y, x + size, y)
