@@ -504,6 +504,20 @@ class SettingsDialog(QtWidgets.QDialog):
         form_mode.setLabelAlignment(QtCore.Qt.AlignmentFlag.AlignRight)
         form_mode.addRow("Mode:", self.mode_combo)
 
+        invert_title = QtWidgets.QLabel("Axis Invert")
+        invert_title.setStyleSheet("color:#8cffc8; font-weight:bold; margin-top:6px;")
+
+        self.j1x_inv = QtWidgets.QCheckBox("Invert J1 X")
+        self.j1y_inv = QtWidgets.QCheckBox("Invert J1 Y")
+        self.j2x_inv = QtWidgets.QCheckBox("Invert J2 X")
+        self.j2y_inv = QtWidgets.QCheckBox("Invert J2 Y")
+
+        invert_grid = QtWidgets.QGridLayout()
+        invert_grid.addWidget(self.j1x_inv, 0, 0)
+        invert_grid.addWidget(self.j1y_inv, 0, 1)
+        invert_grid.addWidget(self.j2x_inv, 1, 0)
+        invert_grid.addWidget(self.j2y_inv, 1, 1)
+
         trail_title = QtWidgets.QLabel("Visual Effects")
         trail_title.setStyleSheet("color:#8cffc8; font-weight:bold; margin-top:6px;")
         self.trail_enable = QtWidgets.QCheckBox("Enable joystick cursor trail")
@@ -542,6 +556,8 @@ class SettingsDialog(QtWidgets.QDialog):
         content_layout.addWidget(line_div)
         content_layout.addWidget(title2)
         content_layout.addLayout(form2)
+        content_layout.addWidget(invert_title)
+        content_layout.addLayout(invert_grid)
         content_layout.addWidget(title_extra)
         content_layout.addLayout(form_extra)
         content_layout.addWidget(pot1_title)
@@ -567,9 +583,30 @@ class SettingsDialog(QtWidgets.QDialog):
 
         self.trail_color_edit = QtWidgets.QLineEdit()
         self.trail_color_edit.setPlaceholderText("#9bffd7")
+
+        # add a pick button + swatch preview
+        self.trail_pick_btn = QtWidgets.QToolButton()
+        self.trail_pick_btn.setText("Pick")
+
+        self.trail_swatch = QtWidgets.QLabel()
+        self.trail_swatch.setFixedSize(22, 22)
+        self.trail_swatch.setStyleSheet("background:#9bffd7; border:1px solid #273034; border-radius:4px;")
+
+        row_widget = QtWidgets.QWidget()
+        row_h = QtWidgets.QHBoxLayout(row_widget)
+        row_h.setContentsMargins(0, 0, 0, 0)
+        row_h.setSpacing(6)
+        row_h.addWidget(self.trail_color_edit, 1)
+        row_h.addWidget(self.trail_pick_btn, 0)
+        row_h.addWidget(self.trail_swatch, 0)
+
         form_trail = QtWidgets.QFormLayout()
         form_trail.setLabelAlignment(QtCore.Qt.AlignmentFlag.AlignRight)
-        form_trail.addRow("Trail Color:", self.trail_color_edit)
+        form_trail.addRow("Trail Color:", row_widget)
+
+        self.trail_pick_btn.clicked.connect(self._pick_trail_color)
+        self.trail_color_edit.textChanged.connect(self._update_trail_swatch)
+
         content_layout.addLayout(form_trail)
 
         bottom = QtWidgets.QHBoxLayout()
@@ -611,9 +648,14 @@ class SettingsDialog(QtWidgets.QDialog):
         self.axis_thresh_edit.setText(str(settings.get("OnChange_Threshold_Axis", 8)))
         self.pot_thresh_edit.setText(str(settings.get("OnChange_Threshold_Pot", 8)))
         self.trail_color_edit.setText(settings.get("Trail_Color", "#9bffd7"))
+        self._update_trail_swatch()
         self.btn1_label_edit.setText(settings.get("Btn1_Label", "Button 1"))
         self.btn2_label_edit.setText(settings.get("Btn2_Label", "Button 2"))
         self.extra_label_edit.setText(settings.get("Extra_Label", "Extra Button"))
+        self.j1x_inv.setChecked(bool(settings.get("Invert_J1X", False)))
+        self.j1y_inv.setChecked(bool(settings.get("Invert_J1Y", False)))
+        self.j2x_inv.setChecked(bool(settings.get("Invert_J2X", False)))
+        self.j2y_inv.setChecked(bool(settings.get("Invert_J2Y", False)))
 
 
     def values(self) -> dict:
@@ -642,7 +684,29 @@ class SettingsDialog(QtWidgets.QDialog):
             "Btn1_Label": self.btn1_label_edit.text().strip() or "Button 1",
             "Btn2_Label": self.btn2_label_edit.text().strip() or "Button 2",
             "Extra_Label": self.extra_label_edit.text().strip() or "Extra Button",
+            "Invert_J1X": self.j1x_inv.isChecked(),
+            "Invert_J1Y": self.j1y_inv.isChecked(),
+            "Invert_J2X": self.j2x_inv.isChecked(),
+            "Invert_J2Y": self.j2y_inv.isChecked(),
         }
+
+    def _pick_trail_color(self):
+        # start from current text or fallback
+        start = self.trail_color_edit.text().strip() or "#9bffd7"
+        start_q = QtGui.QColor(start) if QtGui.QColor(start).isValid() else QtGui.QColor("#9bffd7")
+        col = QtWidgets.QColorDialog.getColor(start_q, self, "Choose Trail Color")
+        if col.isValid():
+            # normalize to #RRGGBB (no alpha)
+            self.trail_color_edit.setText(col.name(QtGui.QColor.HexRgb))
+
+    def _update_trail_swatch(self, *_):
+        c = QtGui.QColor(self.trail_color_edit.text().strip())
+        if not c.isValid():
+            c = QtGui.QColor("#9bffd7")
+        self.trail_swatch.setStyleSheet(
+            f"background:{c.name(QtGui.QColor.HexRgb)}; border:1px solid #273034; border-radius:4px;"
+        )
+
 
     def _emit_send(self):
         self.config_ready.emit(self.values())
@@ -688,6 +752,10 @@ class MainWindow(QtWidgets.QMainWindow):
             "Trail_Color": self._settings.value("Trail_Color", "#9bffd7"),
             "Btn1_Label": self._settings.value("Btn1_Label", "Button 1"),
             "Btn2_Label": self._settings.value("Btn2_Label", "Button 2"),
+            "Invert_J1X": self._settings.value("Invert_J1X", False, type=bool),
+            "Invert_J1Y": self._settings.value("Invert_J1Y", False, type=bool),
+            "Invert_J2X": self._settings.value("Invert_J2X", False, type=bool),
+            "Invert_J2Y": self._settings.value("Invert_J2Y", False, type=bool),
 
         }
 
@@ -951,6 +1019,13 @@ class MainWindow(QtWidgets.QMainWindow):
                 "axis": int(cfg.get("OnChange_Threshold_Axis", 8)),
                 "pot": int(cfg.get("OnChange_Threshold_Pot", 8)),
             },
+            "invert": {
+                "j1x": bool(cfg.get("Invert_J1X", False)),
+                "j1y": bool(cfg.get("Invert_J1Y", False)),
+                "j2x": bool(cfg.get("Invert_J2X", False)),
+                "j2y": bool(cfg.get("Invert_J2Y", False)),
+            },
+            "save": True  # set True when sending from Settings to persist on MCU
         }
         s = "CFG:" + json.dumps(payload, separators=(",", ":"))
         self._send_cmd(s)
@@ -1025,6 +1100,12 @@ class MainWindow(QtWidgets.QMainWindow):
                 th = cfg.get("thresholds", {})
                 out["OnChange_Threshold_Axis"] = int(th.get("axis", out["OnChange_Threshold_Axis"]))
                 out["OnChange_Threshold_Pot"] = int(th.get("pot", out["OnChange_Threshold_Pot"]))
+            if "invert" in cfg:
+                inv = cfg.get("invert", {})
+                out["Invert_J1X"] = bool(inv.get("j1x", out.get("Invert_J1X", False)))
+                out["Invert_J1Y"] = bool(inv.get("j1y", out.get("Invert_J1Y", False)))
+                out["Invert_J2X"] = bool(inv.get("j2x", out.get("Invert_J2X", False)))
+                out["Invert_J2Y"] = bool(inv.get("j2y", out.get("Invert_J2Y", False)))
         except Exception:
             pass
         return out
