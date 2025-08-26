@@ -149,10 +149,11 @@ void printHelp() {
   Serial.println(F("  SET <ID|ALL|X|Y> <ANGLE>"));
   Serial.println(F("  MAP <ID|ALL> <MINus> <MAXus>"));
   Serial.println(F("  INVERT <ID> <0|1>"));
+  Serial.println(F("  TRIM <ID|ALL> <-90..90>"));
   Serial.println(F("  FREQ <50|60>"));
   Serial.println(F("  TWEEN <stepDeg> <intervalMs> (0 disables)"));
   Serial.println(F("  SAVE | LOAD | RESETCFG | DUMPCFG | DUMPBIN"));
-  Serial.println(F("JSON e.g. {\"X\":90,\"invert\":{\"RX\":1},\"map\":{\"ALL\":[600,2400]},\"dumpcfg\":true}"));
+  Serial.println(F("JSON e.g. {\"X\":90,\"trim\":{\"ALL\":-5},\"invert\":{\"RX\":1},\"map\":{\"ALL\":[600,2400]},\"dumpcfg\":true}"));
 }
 
 int idToIndex(const String &id) {
@@ -221,10 +222,23 @@ void handleTextLine(String line) {
         for (uint8_t i=0;i<4;i++) if (m.containsKey(keys[i])) {
           JsonArray arr = m[keys[i]]; if (arr.size()>=2){ uint16_t mi=arr[0], ma=arr[1]; if (mi<ma){ cfg.minUs[i]=mi; cfg.maxUs[i]=ma; } }
         }
-      }
-      // invert
+      }      // invert
       if (doc.containsKey("invert")) {
         JsonVariant inv = doc["invert"]; for (uint8_t i=0;i<4;i++) if (inv.containsKey(keys[i])) cfg.invert[i] = inv[keys[i]] ? 1 : 0;
+      }
+      // trim
+      if (doc.containsKey("trim")) {
+        JsonVariant t = doc["trim"];
+        if (t.containsKey("ALL")) {
+          int v = constrain((int)t["ALL"], -90, 90);
+          for (uint8_t i=0;i<4;i++) cfg.trimDeg[i] = (int8_t)v;
+        }
+        for (uint8_t i=0;i<4;i++) {
+          if (t.containsKey(keys[i])) {
+            int v = constrain((int)t[keys[i]], -90, 90);
+            cfg.trimDeg[i] = (int8_t)v;
+          }
+        }
       }
       // tween
       if (doc.containsKey("tween")) {
@@ -273,11 +287,26 @@ void handleTextLine(String line) {
     int idx=idToIndex(id); if (idx<0){ Serial.println(F("ERR bad ID")); return; }
     cfg.minUs[idx]=mi; cfg.maxUs[idx]=ma; Serial.print(F("OK MAP ")); Serial.println(id); return;
   }
-
   if (cmd=="INVERT" && ntok>=3) {
     int idx=idToIndex(tok[1]); if (idx<0){ Serial.println(F("ERR bad ID")); return; }
     cfg.invert[idx] = tok[2].toInt()?1:0; Serial.print(F("OK INVERT ")); Serial.print(tok[1]); Serial.print(' '); Serial.println((int)cfg.invert[idx]); return;
   }
+
+  // --- TRIM text command ---
+  if (cmd=="TRIM" && ntok>=3) {
+    String id = tok[1]; id.toUpperCase();
+    int val = constrain(tok[2].toInt(), -90, 90);
+    if (id == "ALL") {
+      for (uint8_t i=0;i<4;i++) cfg.trimDeg[i] = (int8_t)val;
+      Serial.print(F("OK TRIM ALL ")); Serial.println(val);
+      return;
+    }
+    int idx = idToIndex(id); if (idx<0){ Serial.println(F("ERR bad ID")); return; }
+    cfg.trimDeg[idx] = (int8_t)val;
+    Serial.print(F("OK TRIM ")); Serial.print(id); Serial.print(' '); Serial.println(val);
+    return;
+  }
+
 
   if (cmd=="FREQ" && ntok>=2) {
     int f=tok[1].toInt(); if (f==50||f==60){ cfg.freqHz=f; pwm.setPWMFreq(cfg.freqHz); Serial.print(F("OK FREQ ")); Serial.println(f); } else Serial.println(F("ERR freq")); return;
