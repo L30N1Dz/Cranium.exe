@@ -147,7 +147,7 @@ class MainWindow(QMainWindow):
         x_l.addWidget(self.x_set_min_btn, 2, 2)
         x_l.addWidget(self.x_set_max_btn, 2, 3)
         x_l.addWidget(self.x_reset_limit_btn, 2, 4)
-        outer.addWidget(x_group)
+        # Defer adding the X axis group until we assemble the combined slider area
 
         # Y Axis group (controls LY and RY)
         y_group = QGroupBox("Y Axis (SET Y)"); y_l = QGridLayout(y_group)
@@ -162,11 +162,16 @@ class MainWindow(QMainWindow):
         y_l.addWidget(self.y_set_min_btn, 2, 2)
         y_l.addWidget(self.y_set_max_btn, 2, 3)
         y_l.addWidget(self.y_reset_limit_btn, 2, 4)
-        outer.addWidget(y_group)
+        # Defer adding the Y axis group until we assemble the combined slider area
 
         # Move speed control – vertical slider controlling tween speed
-        speed_group = QGroupBox("Move Speed")
-        speed_layout = QVBoxLayout(speed_group)
+        #
+        # Create the speed control as an instance attribute so it can be
+        # referenced when assembling the combined slider area.  Do not add
+        # it to the outer layout here; it will be placed to the right of
+        # the X/Y and per‑servo controls later.
+        self.speed_group = QGroupBox("Move Speed")
+        speed_layout = QVBoxLayout(self.speed_group)
         self.speed_slider = QSlider(Qt.Vertical)
         self.speed_slider.setRange(0, 100)
         # Initialise slider based on current tween settings (rough mapping)
@@ -185,7 +190,7 @@ class MainWindow(QMainWindow):
         speed_layout.addWidget(self.speed_label, alignment=Qt.AlignHCenter)
         speed_layout.addWidget(self.speed_slider, alignment=Qt.AlignHCenter)
         speed_layout.addWidget(self.speed_value_label, alignment=Qt.AlignHCenter)
-        outer.addWidget(speed_group)
+        # Do not add the speed group to the outer layout here
 
         # Per‑servo controls with set centre buttons
         s_group = QGroupBox("Per‑Servo Controls (SET <ID>)"); s_l = QGridLayout(s_group)
@@ -202,7 +207,21 @@ class MainWindow(QMainWindow):
             center_btn = QPushButton("Set Center"); self.s_center_btn[sid] = center_btn
             s_l.addWidget(sl, row, 1); s_l.addWidget(sp, row, 2); s_l.addWidget(lab, row, 3); s_l.addWidget(center_btn, row, 4)
             row += 1
-        outer.addWidget(s_group)
+        # Defer adding the per‑servo group until we assemble the combined slider area
+
+        # After creating the X/Y axis groups, speed slider and per‑servo group,
+        # assemble them into a single horizontal layout.  The left column
+        # contains the X axis, Y axis and per‑servo controls stacked
+        # vertically.  The speed slider group is placed on the right to
+        # span the full height of these controls.
+        slider_col_layout = QVBoxLayout()
+        slider_col_layout.addWidget(x_group)
+        slider_col_layout.addWidget(y_group)
+        slider_col_layout.addWidget(s_group)
+        slider_row_layout = QHBoxLayout()
+        slider_row_layout.addLayout(slider_col_layout)
+        slider_row_layout.addWidget(self.speed_group)
+        outer.addLayout(slider_row_layout)
 
         # Visualisation group
         vis_group = QGroupBox("Visualisation"); vis_l = QHBoxLayout(vis_group)

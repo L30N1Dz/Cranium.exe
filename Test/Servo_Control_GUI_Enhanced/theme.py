@@ -1,131 +1,200 @@
+"""
+Modern dystopian / neon theme for PySide6/PyQt widgets.
+Drop-in replacement for your previous theme.py.
+
+Usage:
+    from theme import apply_dark_theme
+    apply_dark_theme(app)  # where `app` is your QApplication
+
+Only the header palette below needs tweaking to shift the vibe.
+"""
+from __future__ import annotations
+
 from PySide6.QtWidgets import QApplication
-import sys
+
 
 def apply_dark_theme(app: QApplication) -> None:
-    """Apply a dark theme with custom colors to the application using stylesheets.
+    """Apply a sleek sci‑fi/dystopian dark theme via Qt stylesheets.
 
-    Styles all widgets (QGroupBox, QPushButton, QComboBox, QSlider, QSpinBox,
-    QLabel, QTextEdit, QCheckBox) with consistent colors and rounded buttons.
+    This keeps layout/metrics intact while fixing contrast on buttons and
+    introducing subtle neon accents, focus rings, and calm selections.
     """
-    try:
-        # Define color palette
-        primary_bg = "rgb(43, 43, 43)"  # Main window background
-        input_bg = "rgb(30, 30, 30)"    # Input widget background
-        gold = "rgb(161, 163, 25)"      # Custom gold color
-        pink = "pink"                    # QGroupBox title color
-        green = "rgb(0, 255, 0)"        # Text color (from QPalette.WindowText)
-        black = "rgb(0, 0, 0)"          # Text color for inputs/buttons
-        bright_red = "rgb(255, 64, 64)" # Bright text (e.g., errors)
-        link_blue = "rgb(90, 170, 220)" # Links
-        highlight = "rgb(60, 120, 180)" # Selection/highlight
-        text_highlight = "rgb(245, 245, 245)"  # Highlighted text
+    # ===================== THEME HEADER (edit me) ==========================
+    base_bg        = "#0B0F14"
+    input_bg       = "#121823"
+    panel_bg       = "#0E141E"
 
-        # Apply stylesheet
-        app.setStyleSheet(f"""
-            /* General window and widget background */
-            QWidget {{
-                background-color: {primary_bg};
-                color: {green};
-            }}
+    green_accent   = "#34F5C5"
+    light_green    = "#6CFFD9"
+    dark_green     = "#17C29E"
 
-            /* QGroupBox title */
-            QGroupBox {{
-                color: {pink};
-            }}
+    bright_purple  = "#8B5CF6"
 
-            /* QPushButton with rounded corners */
-            QPushButton {{
-                background-color: {gold};
-                color: {black};
-                border-radius: 10px;
-                border: 1px solid {gold};
-                padding: 5px;
-            }}
-            QPushButton:hover {{
-                background-color: rgb(181, 183, 45); /* Lighter gold on hover */
-            }}
-            QPushButton:pressed {{
-                background-color: rgb(141, 143, 15); /* Darker gold when pressed */
-            }}
+    highlight_bg   = "#1F2A44"
+    highlight_fg   = "#E7F9FF"
 
-            /* QComboBox */
-            QComboBox {{
-                background-color: {gold};
-                color: {black};
-                border: 1px solid {gold};
-            }}
-            QComboBox QAbstractItemView {{
-                background-color: {gold};
-                color: {black};
-                selection-background-color: {highlight};
-                selection-color: {text_highlight};
-            }}
+    text_primary   = "#D6E6EC"
+    text_muted     = "#9BB1BA"
 
-            /* QSlider */
-            QSlider::groove:horizontal, QSlider::groove:vertical {{
-                background-color: {gold};
-            }}
-            QSlider::handle:horizontal, QSlider::handle:vertical {{
-                background-color: {highlight};
-                border: 1px solid {highlight};
-                width: 10px;
-                margin: -2px 0;
-                border-radius: 5px;
-            }}
-            QSlider::handle:horizontal:hover, QSlider::handle:vertical:hover {{
-                background-color: rgb(80, 140, 200); /* Lighter highlight on hover */
-            }}
+    dark_gray      = "#E6F3F7"
 
-            /* QSpinBox */
-            QSpinBox {{
-                background-color: {gold};
-                color: {black};
-                border: 1px solid {gold};
-            }}
-            QSpinBox::up-button, QSpinBox::down-button {{
-                background-color: {gold};
-                border: none;
-            }}
-            QSpinBox::up-button:hover, QSpinBox::down-button:hover {{
-                background-color: rgb(181, 183, 45); /* Lighter gold on hover */
-            }}
+    radius_sm      = 6
+    radius_md      = 8
+    outline        = green_accent
 
-            /* QLabel */
-            QLabel {{
-                color: {green};
-            }}
+    font_stack     = "'Orbitron', 'Segoe UI', 'Roboto', Arial, sans-serif"
 
-            /* QTextEdit */
-            QTextEdit {{
-                background-color: {input_bg};
-                color: {green};
-                selection-background-color: {highlight};
-                selection-color: {text_highlight};
-            }}
+    # ======================= STYLESHEET START ==============================
+    qss = f"""
+    QWidget {{
+        background-color: {base_bg};
+        color: {text_primary};
+        font-family: {font_stack};
+        selection-background-color: {highlight_bg};
+        selection-color: {highlight_fg};
+    }}
 
-            /* QCheckBox */
-            QCheckBox {{
-                color: {green};
-            }}
-            QCheckBox::indicator {{
-                background-color: {input_bg};
-                border: 1px solid {gold};
-            }}
-            QCheckBox::indicator:checked {{
-                background-color: {gold};
-            }}
+    QGroupBox {{
+        border: 1px solid {outline};
+        border-radius: {radius_md}px;
+        /* symmetric vertical spacing around group boxes */
+        margin: 12px 0;
+        background-color: {panel_bg};
+        /* reduce internal padding so the contents sit closer to the border */
+        padding: 6px 8px;
+    }}
+    QGroupBox::title {{
+        subcontrol-origin: margin;
+        left: 12px;
+        /* adjust the title position slightly upward */
+        top: -4px;
+        padding: 0 8px;
+        color: {bright_purple};
+        background-color: {base_bg};
+    }}
 
-            /* Tooltips */
-            QToolTip {{
-                background-color: {input_bg};
-                color: {green};
-                border: 1px solid {gold};
-            }}
-        """)
+    QLabel {{ color: {text_primary}; }}
 
-        # Debug information
-        print(f"Applied dark theme. Qt style: {app.style().objectName()}")
-        print(f"Application stylesheet: {app.styleSheet()}")
-    except Exception as e:
-        print(f"Error applying dark theme: {e}")
-        sys.stderr.write(f"Theme application failed: {e}\n")
+    QLineEdit, QSpinBox, QDoubleSpinBox, QComboBox, QTextEdit, QPlainTextEdit {{
+        background-color: rgba(18, 24, 35, 0.85);
+        border: 1px solid {outline};
+        border-radius: {radius_sm}px;
+        padding: 4px 6px;
+        color: {text_primary};
+    }}
+    QLineEdit:focus, QSpinBox:focus, QDoubleSpinBox:focus, QComboBox:focus,
+    QTextEdit:focus, QPlainTextEdit:focus {{
+        border: 1px solid {bright_purple};
+        /* Qt style sheets do not support box-shadow; rely solely on border colour */
+    }}
+
+    QComboBox QAbstractItemView {{
+        background: {input_bg};
+        color: {text_primary};
+        border: 1px solid {outline};
+        selection-background-color: {highlight_bg};
+        selection-color: {highlight_fg};
+    }}
+
+    QPushButton {{
+        color: {dark_gray};
+        border: 1px solid {outline};
+        border-radius: {radius_sm}px;
+        background-color: rgba(52, 245, 197, 0.06);
+        padding: 4px 10px;
+    }}
+    QPushButton:hover {{
+        border-color: {light_green};
+        background-color: rgba(108, 255, 217, 0.10);
+    }}
+    QPushButton:pressed {{
+        border-color: {dark_green};
+        background-color: rgba(23, 194, 158, 0.14);
+    }}
+    QPushButton:focus {{
+        border: 1px solid {bright_purple};
+        /* box-shadow is not supported in Qt style sheets */
+    }}
+    QPushButton:disabled {{
+        color: rgba(231, 249, 255, 0.35);
+        border-color: rgba(52, 245, 197, 0.25);
+        background-color: rgba(255,255,255,0.02);
+    }}
+
+    QCheckBox, QRadioButton {{
+        color: {text_primary};
+        spacing: 6px;
+    }}
+    QCheckBox::indicator, QRadioButton::indicator {{
+        width: 15px; height: 15px;
+        border: 1px solid {outline};
+        background: {base_bg};
+        border-radius: 3px;
+    }}
+    QCheckBox::indicator:checked {{
+        background: {green_accent};
+        border-color: {green_accent};
+    }}
+    QRadioButton::indicator {{ border-radius: 8px; }}
+    QRadioButton::indicator:checked {{
+        background: {green_accent};
+        border-color: {green_accent};
+    }}
+
+    QSlider::groove:horizontal {{
+        height: 6px;
+        background: {panel_bg};
+        border: 1px solid {outline};
+        border-radius: 3px;
+    }}
+    QSlider::handle:horizontal {{
+        width: 16px;
+        margin: -6px 0;
+        border: 1px solid {bright_purple};
+        background: {green_accent};
+        border-radius: 8px;
+    }}
+
+    QProgressBar {{
+        background: {panel_bg};
+        border: 1px solid {outline};
+        border-radius: {radius_sm}px;
+        text-align: center;
+        color: {text_muted};
+    }}
+    QProgressBar::chunk {{ background: {green_accent}; }}
+
+    QHeaderView::section {{
+        background: {panel_bg};
+        color: {text_primary};
+        border: 1px solid {outline};
+        padding: 4px 6px;
+    }}
+    QTableView {{
+        gridline-color: {outline};
+        selection-background-color: {highlight_bg};
+        selection-color: {highlight_fg};
+        background: {base_bg};
+    }}
+
+    QScrollBar:vertical {{
+        width: 12px;
+        background: {base_bg};
+        margin: 2px; border: none;
+    }}
+    QScrollBar::handle:vertical {{
+        background: {outline};
+        min-height: 24px; border-radius: 6px;
+    }}
+    QScrollBar:horizontal {{ height: 12px; background: {base_bg}; margin: 2px; border: none; }}
+    QScrollBar::handle:horizontal {{ background: {outline}; min-width: 24px; border-radius: 6px; }}
+
+    QFrame[frameShape="4"], QFrame[frameShape="5"] {{
+        background: {outline};
+    }}
+    """
+
+    app.setStyleSheet(qss)
+
+
+__all__ = ["apply_dark_theme"]
