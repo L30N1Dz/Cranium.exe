@@ -203,7 +203,7 @@ void handleTextLine(String line) {
   line.trim(); if (!line.length()) return;
   // If it looks like JSON, try JSON first
   if (line[0]=='{' && line.endsWith("}")) {
-    StaticJsonDocument<512> doc;
+    StaticJsonDocument<1024> doc;
     DeserializationError err = deserializeJson(doc, line);
     if (!err) {
       // Angles by pair
@@ -359,7 +359,7 @@ void loop() {
       handleTextLine(lineBuf);
       lineBuf = "";
     } else {
-      if (lineBuf.length() < 192) lineBuf += c; // guard against overrun
+      if (lineBuf.length() < 380) lineBuf += c; // guard against overrun
     }
   }
 

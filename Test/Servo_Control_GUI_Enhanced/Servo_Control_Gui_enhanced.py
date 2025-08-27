@@ -46,34 +46,7 @@ from serial_worker import SerialWorker, DeviceConfig, SERVO_IDS, IDX, available_
 from settings_dialog import SettingsDialog
 from visualization_widget import EyeVisualizer
 from joystick_handler import JoystickHandler
-
-
-def apply_dark_theme(app: QApplication) -> None:
-    """Configure a dark palette for the entire application.
-
-    The previous palette used pure white text on very dark backgrounds which
-    resulted in insufficient contrast on some widgets.  This palette
-    intentionally uses slightly lighter text and slightly lighter dark
-    backgrounds to improve readability across platforms.
-    """
-    dark = QPalette()
-    # Background colours
-    dark.setColor(QPalette.Window, QColor(43, 43, 43))      # primary window background
-    dark.setColor(QPalette.Base, QColor(30, 30, 30))        # input widgets
-    dark.setColor(QPalette.AlternateBase, QColor(50, 50, 50))
-    dark.setColor(QPalette.Button, QColor(43, 43, 43))
-    # Text colours
-    dark.setColor(QPalette.WindowText, Qt.green)
-    dark.setColor(QPalette.Text, Qt.red)
-    dark.setColor(QPalette.ButtonText, Qt.red)
-    dark.setColor(QPalette.ToolTipBase, QColor(30, 30, 30))
-    dark.setColor(QPalette.ToolTipText, QColor(220, 220, 220))
-    dark.setColor(QPalette.BrightText, QColor(255, 64, 64))
-    dark.setColor(QPalette.Link, QColor(90, 170, 220))
-    dark.setColor(QPalette.Highlight, QColor(60, 120, 180))
-    dark.setColor(QPalette.HighlightedText, QColor(245, 245, 245))
-    app.setPalette(dark)
-
+from theme import apply_dark_theme
 
 class MainWindow(QMainWindow):
     start_serial = Signal(str)
@@ -508,7 +481,7 @@ class MainWindow(QMainWindow):
         if payload.get("GET"):
             self._send_line("GET"); return
         try:
-            line = json.dumps(payload)
+            line = json.dumps(payload, separators=(',', ':'))
             self._send_line(line)
         except Exception as e:
             QMessageBox.warning(self, "Settings", f"Failed to send settings: {e}")
