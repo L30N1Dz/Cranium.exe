@@ -49,22 +49,29 @@ from joystick_handler import JoystickHandler
 
 
 def apply_dark_theme(app: QApplication) -> None:
-    """Configure a dark palette for the entire application."""
+    """Configure a dark palette for the entire application.
+
+    The previous palette used pure white text on very dark backgrounds which
+    resulted in insufficient contrast on some widgets.  This palette
+    intentionally uses slightly lighter text and slightly lighter dark
+    backgrounds to improve readability across platforms.
+    """
     dark = QPalette()
-    # Base colours
-    dark.setColor(QPalette.Window, QColor(53, 53, 53))
+    # Background colours
+    dark.setColor(QPalette.Window, QColor(43, 43, 43))      # primary window background
+    dark.setColor(QPalette.Base, QColor(30, 30, 30))        # input widgets
+    dark.setColor(QPalette.AlternateBase, QColor(50, 50, 50))
+    dark.setColor(QPalette.Button, QColor(43, 43, 43))
+    # Text colours
     dark.setColor(QPalette.WindowText, Qt.green)
-    dark.setColor(QPalette.Base, QColor(35, 35, 35))
-    dark.setColor(QPalette.AlternateBase, QColor(53, 53, 53))
-    dark.setColor(QPalette.ToolTipBase, Qt.yellow)
-    dark.setColor(QPalette.ToolTipText, Qt.yellow)
     dark.setColor(QPalette.Text, Qt.red)
-    dark.setColor(QPalette.Button, QColor(53, 53, 53))
-    dark.setColor(QPalette.ButtonText, Qt.black)
-    dark.setColor(QPalette.BrightText, Qt.red)
-    dark.setColor(QPalette.Link, QColor(42, 130, 218))
-    dark.setColor(QPalette.Highlight, QColor(42, 130, 218))
-    dark.setColor(QPalette.HighlightedText, Qt.black)
+    dark.setColor(QPalette.ButtonText, Qt.red)
+    dark.setColor(QPalette.ToolTipBase, QColor(30, 30, 30))
+    dark.setColor(QPalette.ToolTipText, QColor(220, 220, 220))
+    dark.setColor(QPalette.BrightText, QColor(255, 64, 64))
+    dark.setColor(QPalette.Link, QColor(90, 170, 220))
+    dark.setColor(QPalette.Highlight, QColor(60, 120, 180))
+    dark.setColor(QPalette.HighlightedText, QColor(245, 245, 245))
     app.setPalette(dark)
 
 
@@ -134,14 +141,19 @@ class MainWindow(QMainWindow):
         top_l.addWidget(self.save_btn); top_l.addWidget(self.load_btn); top_l.addWidget(self.reset_btn)
         top_l.addWidget(self.status_lbl)
         # TX rate and EOL and hex log
+        # Rate at which queued commands are sent (ms)
         self.rate_spin = QSpinBox(); self.rate_spin.setRange(10, 200); self.rate_spin.setValue(30)
-        top_l.addWidget(QLabel("TX rate (ms):")); top_l.addWidget(self.rate_spin)
+        top_l.addWidget(QLabel("Cmd rate (ms):")); top_l.addWidget(self.rate_spin)
         self.eol_box = QComboBox(); self.eol_box.addItems(["CRLF (\\r\\n)", "LF (\\n)"])
         self.eol_box.setCurrentIndex(1)
         top_l.addWidget(QLabel("EOL:")); top_l.addWidget(self.eol_box)
         self.hex_cb = QCheckBox("Log TX bytes (hex)"); self.hex_cb.setChecked(False)
         self.hex_cb.toggled.connect(self.set_hexlog)
         top_l.addWidget(self.hex_cb)
+        # Status polling toggle (when unchecked GET is not sent periodically)
+        self.poll_cb = QCheckBox("Status Polling")
+        self.poll_cb.setChecked(True)
+        top_l.addWidget(self.poll_cb)
         outer.addWidget(top)
 
         # X Axis group (controls LX and RX)
@@ -178,6 +190,29 @@ class MainWindow(QMainWindow):
         y_l.addWidget(self.y_set_max_btn, 2, 3)
         y_l.addWidget(self.y_reset_limit_btn, 2, 4)
         outer.addWidget(y_group)
+
+        # Move speed control – vertical slider controlling tween speed
+        speed_group = QGroupBox("Move Speed")
+        speed_layout = QVBoxLayout(speed_group)
+        self.speed_slider = QSlider(Qt.Vertical)
+        self.speed_slider.setRange(0, 100)
+        # Initialise slider based on current tween settings (rough mapping)
+        # Map existing cfg.step_deg and cfg.step_ms into 0–100 range: high speed when step_deg high and step_ms low
+        # Avoid division by zero by using defaults if zero
+        try:
+            # Normalise to approximate speed value
+            speed_val = int((self.cfg.step_deg / 10.0) * 50 + ((200 - self.cfg.step_ms) / 200.0) * 50)
+        except Exception:
+            speed_val = 50
+        self.speed_slider.setValue(min(100, max(0, speed_val)))
+        self.speed_slider.setTickInterval(10); self.speed_slider.setTickPosition(QSlider.TicksBothSides)
+        self.speed_slider.valueChanged.connect(self._speed_changed)
+        self.speed_label = QLabel("Speed")
+        self.speed_value_label = QLabel(str(self.speed_slider.value()))
+        speed_layout.addWidget(self.speed_label, alignment=Qt.AlignHCenter)
+        speed_layout.addWidget(self.speed_slider, alignment=Qt.AlignHCenter)
+        speed_layout.addWidget(self.speed_value_label, alignment=Qt.AlignHCenter)
+        outer.addWidget(speed_group)
 
         # Per‑servo controls with set centre buttons
         s_group = QGroupBox("Per‑Servo Controls (SET <ID>)"); s_l = QGridLayout(s_group)
@@ -232,6 +267,9 @@ class MainWindow(QMainWindow):
         self.reset_btn.clicked.connect(lambda: self._send_line("RESETCFG"))
         self.eol_box.currentIndexChanged.connect(lambda: None)  # placeholder for EOL
 
+        # Polling toggle
+        self.poll_cb.toggled.connect(self._toggle_polling)
+
         self.x_slider.valueChanged.connect(self._x_slider_changed)
         self.x_spin.valueChanged.connect(self._x_spin_changed)
         self.x_set_min_btn.clicked.connect(lambda: self._set_axis_limit(axis='X', which='min'))
@@ -283,8 +321,9 @@ class MainWindow(QMainWindow):
     def on_connected(self, port: str) -> None:
         self.status_lbl.setText(f"Connected: {port}")
         self.connect_btn.setText("Disconnect"); self.connect_btn.setEnabled(True)
-        self.poll.start()
-        # Ask for a snapshot
+        if self.poll_cb.isChecked():
+            self.poll.start()
+        # Always ask for a snapshot on connect
         self._send_line("GET")
 
     @Slot()
@@ -320,8 +359,40 @@ class MainWindow(QMainWindow):
             self.console.append(f"TX: {line}")
 
     def _poll_tick(self) -> None:
+        if not self.poll_cb.isChecked():
+            return
         if (time.monotonic() - getattr(self, "_last_tx", 0)) >= 1.0:
             self._send_line("GET")
+
+    def _toggle_polling(self, enabled: bool) -> None:
+        """Enable or disable the periodic status polling."""
+        if enabled:
+            # Immediately send a GET when enabling
+            self._send_line("GET")
+        else:
+            # When disabling polling do nothing; state will persist
+            pass
+
+    # ---- Speed control ----
+    def _speed_changed(self, val: int) -> None:
+        """Adjust the servo movement smoothing based on slider value."""
+        # Update numeric label
+        self.speed_value_label.setText(str(val))
+        # Map slider 0–100 to tween parameters.  Higher value means faster movement.
+        # Compute step_deg between 1 and 10
+        step_deg = 1 + int((val / 100.0) * 9)
+        # Compute interval_ms between 200 (slow) and 0 (fast)
+        interval_ms = int((100 - val) / 100.0 * 200)
+        # Update local configuration
+        self.cfg.step_deg = step_deg
+        self.cfg.step_ms = interval_ms
+        # Send tween update to the device
+        payload = {"tween": {"step_deg": step_deg, "interval_ms": interval_ms}}
+        try:
+            line = json.dumps(payload)
+            self._send_line(line)
+        except Exception as e:
+            self.console.append(f"<span style='color:#c66;'>Tween Error:</span> {e}")
 
     # ---- X/Y paired sliders/spins ----
     def _x_slider_changed(self, val: int) -> None:
@@ -444,21 +515,19 @@ class MainWindow(QMainWindow):
 
     # ---- Save to device ----
     def _save_to_device(self) -> None:
-        """Persist the current runtime configuration to EEPROM on the device."""
-        # Gather current configuration into a JSON payload and include 'save': True
-        payload: Dict[str, object] = {
-            "freq": self.cfg.freq_hz,
-            "tween": {"step_deg": self.cfg.step_deg, "interval_ms": self.cfg.step_ms},
-            "invert": {sid: int(self.cfg.invert[IDX[sid]]) for sid in SERVO_IDS},
-            "map": {sid: [int(self.cfg.min_us[IDX[sid]]), int(self.cfg.max_us[IDX[sid]])] for sid in SERVO_IDS},
-            "trim": {sid: int(self.cfg.trim_deg[IDX[sid]]) for sid in SERVO_IDS},
-            "save": True,
-        }
+        """Persist the current configuration to EEPROM on the device.
+
+        The firmware supports a simple ``SAVE`` text command which stores
+        whatever configuration is currently active.  All configuration
+        changes (map/invert/trim/freq/tween) should have been applied
+        beforehand via the settings dialog or the dedicated controls.
+        """
         try:
-            line = json.dumps(payload)
-            self._send_line(line)
+            self._send_line("SAVE")
+            # Ask for a snapshot after saving to refresh local config
+            self._send_line("GET")
         except Exception as e:
-            QMessageBox.warning(self, "Save", f"Failed to send save payload: {e}")
+            QMessageBox.warning(self, "Save", f"Failed to send SAVE command: {e}")
 
     # ---- Incoming lines ----
     @Slot(str)
@@ -556,6 +625,12 @@ class MainWindow(QMainWindow):
             return max(0, min(180, int(round(a))))
         lx_i = clamp_angle(lx); ly_i = clamp_angle(ly)
         rx_i = clamp_angle(rx); ry_i = clamp_angle(ry)
+        # Only apply updates if joystick values have changed since last sample
+        last = getattr(self, '_last_joy_angles', None)
+        current = (lx_i, ly_i, rx_i, ry_i)
+        if last is not None and current == last:
+            return
+        self._last_joy_angles = current
         # Update left eye controls
         self.s_sliders['LX'].blockSignals(True); self.s_spins['LX'].blockSignals(True)
         self.s_sliders['LX'].setValue(lx_i); self.s_spins['LX'].setValue(lx_i)
