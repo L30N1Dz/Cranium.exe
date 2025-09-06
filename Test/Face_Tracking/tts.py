@@ -1,26 +1,26 @@
 from __future__ import annotations
 
-"""Text-to-speech manager supporting system and Kokoro backends.
+"""
+Fully local TTS manager with two backends:
+  • SYSTEM      → OS voices via pyttsx3 (safe fallback)
+  • KOKORO82M   → hexgrad Kokoro‑82M (PyTorch) using local .pt voices
 
-This module defines ``TTSManager``, a robust, threaded text-to-speech engine
-that can speak queued utterances using either the host system voices via
-``pyttsx3`` or the Kokoro ONNX model.  The manager creates a fresh
-``pyttsx3`` engine for every utterance to avoid the one-and-done stall
-seen on Windows when reusing SAPI engines.  When Kokoro is selected and
-properly configured via environment variables ``KOKORO_MODEL_PATH`` and
-``KOKORO_VOICES_PATH``, the manager instantiates Kokoro per utterance,
-passing explicit paths to ensure the chosen voice is applied.  If any
-step fails, it falls back to the system backend gracefully.
+Key change vs earlier builds
+----------------------------
+This version **does not** instantiate `KModel` or manually load `kokoro‑v1_0.pth`.
+It lets `KPipeline` construct the correct model internally and then feeds your
+local voice tensor (`*.pt`) directly to `voice=`. That removes the
+state‑dict mismatch you’re seeing (all those missing/extra keys).
 
-Example usage::
+Env you should set in main.py (before creating TTSManager)
+---------------------------------------------------------
+- `KOKORO82M_VOICES_DIR` → folder containing voice `*.pt` files (e.g., am_adam.pt)
+- Optional for offline: `HF_HUB_OFFLINE=1` and `HF_HOME` to a local cache dir.
 
-    tts = TTSManager()
-    tts.set_backend("kokoro")
-    tts.set_voice_by_hint("am_adam")
-    tts.speak("Hello world")
+Packages
+--------
+`pip install --upgrade kokoro torch transformers sentencepiece tokenizers huggingface_hub safetensors unidecode sounddevice pyttsx3`
 
-    # Clean up when finished
-    tts.stop()
 """
 
 import os
@@ -28,316 +28,218 @@ import sys
 import queue
 import threading
 from enum import Enum
-from typing import Optional, List, Tuple
+from typing import Optional, Tuple, List
 
+# third‑party
 try:
-    import numpy as np  # type: ignore
+    import numpy as np
 except Exception:  # pragma: no cover
     np = None  # type: ignore
 
 try:
-    import sounddevice as sd  # type: ignore
+    import sounddevice as sd
 except Exception:  # pragma: no cover
     sd = None  # type: ignore
 
 try:
-    import pyttsx3  # type: ignore
+    import pyttsx3
 except Exception:  # pragma: no cover
-    pyttsx3 = None
+    pyttsx3 = None  # type: ignore
 
-# Attempt to import Kokoro from the two common package names.  The
-# ``kokoro-onnx`` package exposes the class under ``kokoro_onnx``, while
-# ``kokoro`` packages export it directly.  We try both and set a
-# sentinel flag accordingly.
-_KOKORO_IMPORTED = False
-_Kokoro = None
+# kokoro / torch (guarded import so we can show clean errors)
+_KOKORO_OK = True
+_KOKORO_ERR: Optional[BaseException] = None
 try:
-    from kokoro_onnx import Kokoro as _Kokoro  # type: ignore
-    _KOKORO_IMPORTED = True
-except Exception:
-    try:
-        from kokoro import Kokoro as _Kokoro  # type: ignore
-        _KOKORO_IMPORTED = True
-    except Exception:
-        _KOKORO_IMPORTED = False
-        _Kokoro = None
+    import torch
+    from kokoro import KPipeline
+except Exception as e:  # pragma: no cover
+    _KOKORO_OK = False
+    _KOKORO_ERR = e
 
 
 class TTSBackend(str, Enum):
-    """Enumeration of the supported TTS backends."""
-
     SYSTEM = "system"
-    KOKORO = "kokoro"
+    KOKORO82M = "kokoro82m"
 
 
 class TTSManager:
-    """Threaded text-to-speech manager.
-
-    The manager runs a worker thread that processes utterance requests
-    enqueued via :meth:`speak`.  It supports two backends: the
-    ``system`` backend uses ``pyttsx3`` for synthesis; the ``kokoro``
-    backend uses the Kokoro ONNX model.  For reliability on Windows,
-    each utterance is synthesised with a fresh ``pyttsx3`` engine
-    created on the worker thread; this avoids the problem where only
-    the first utterance is spoken when reusing a single engine.  When
-    Kokoro is selected, the manager instantiates a new Kokoro object
-    for each utterance with explicit model and voice paths read from
-    environment variables.  If Kokoro cannot be initialised or fails
-    to synthesise, synthesis falls back to the system backend.
-    """
-
-    def __init__(self, backend: TTSBackend | str = TTSBackend.SYSTEM,
-                 voice_hint: Optional[str] = None) -> None:
+    def __init__(self,
+                 backend: TTSBackend | str = TTSBackend.SYSTEM,
+                 voice_hint: Optional[str] = None,
+                 lang_code: str = "a",      # 'a' = American English in Kokoro
+                 speed: float = 1.0) -> None:
         self._backend: TTSBackend = TTSBackend(backend)
-        self._voice_hint: Optional[str] = voice_hint
+        self._voice_hint = voice_hint
+        self._lang_code = lang_code
+        self._speed = float(speed)
 
-        # Queue for utterances: each item is (text, per-call voice hint)
-        self._queue: "queue.Queue[Tuple[str, Optional[str]]]" = queue.Queue()
-        # Event to signal worker thread termination
-        self._stop_event = threading.Event()
-        # Start the worker thread
-        self._worker_thread = threading.Thread(
-            target=self._worker, name="TTSWorker", daemon=True
-        )
-        self._worker_thread.start()
+        self._stop = threading.Event()
+        self._q: "queue.Queue[tuple[str, Optional[str]]]" = queue.Queue()
+        self._th = threading.Thread(target=self._worker, name="TTSWorker", daemon=True)
 
-    # ------------------------------------------------------------------
-    # Public API
-    # ------------------------------------------------------------------
+        # kokoro bits
+        self._pipe: Optional[KPipeline] = None
+        self._voices_dir: Optional[str] = None
+
+        self._th.start()
+
+    # ---------------- public API ----------------
+    def set_backend(self, backend: TTSBackend | str) -> None:
+        self._backend = TTSBackend(backend)
+        # reset/late‑init pipeline on next use
+
+    def set_voice_by_hint(self, hint: Optional[str]) -> None:
+        self._voice_hint = (hint or None)
+
+    def set_speed(self, speed: float) -> None:
+        self._speed = max(0.5, min(2.0, float(speed)))
+
     def list_voices(self) -> List[str]:
-        """Return available voice names for the current backend.
-
-        For the Kokoro backend, we present a fixed list of common voice
-        identifiers (``am_adam``, ``am_molly``, etc.) when both the
-        model and voices files exist.  Otherwise we defer to the
-        system backend.  For the system backend, installed voices are
-        enumerated via ``pyttsx3``, with a fallback to a single
-        ``"Default"`` entry if enumeration fails.
-        """
-        if self._backend == TTSBackend.KOKORO:
-            model_path = os.environ.get("KOKORO_MODEL_PATH", "")
-            voices_path = os.environ.get("KOKORO_VOICES_PATH", "")
-            if os.path.isfile(model_path) and os.path.isfile(voices_path):
-                return [
-                    "am_adam",
-                    "am_molly",
-                    "am_dave",
-                    "am_lisa",
-                    "am_mark",
-                    "am_sarah",
-                ]
-        # System voices via pyttsx3
+        if self._backend == TTSBackend.KOKORO82M:
+            d = os.environ.get("KOKORO82M_VOICES_DIR", "")
+            out: List[str] = []
+            if d and os.path.isdir(d):
+                for fn in sorted(os.listdir(d)):
+                    if fn.lower().endswith(".pt"):
+                        out.append(os.path.splitext(fn)[0])
+            return out or ["am_adam"]
+        # system
         names: List[str] = []
-        if pyttsx3:
+        if pyttsx3 is not None:
             try:
                 eng = pyttsx3.init()
                 for v in eng.getProperty("voices"):
-                    try:
-                        names.append(v.name)
-                    except Exception:
-                        continue
-                try:
-                    eng.stop()
-                except Exception:
-                    pass
+                    nm = getattr(v, "name", None)
+                    if nm:
+                        names.append(nm)
+                eng.stop()
             except Exception:
                 pass
         return names or ["Default"]
 
-    def set_backend(self, backend: TTSBackend | str) -> None:
-        """Switch the synthesis backend.
-
-        The backend can be changed at runtime.  Valid values are
-        ``"system"`` and ``"kokoro"`` (case-insensitive).  If an
-        invalid value is supplied, a :class:`ValueError` is raised.
-        """
-        self._backend = TTSBackend(backend)
-
-    def set_voice_by_hint(self, hint: Optional[str]) -> None:
-        """Set a global voice hint used when synthesising utterances.
-
-        The hint is matched case-insensitively against installed voice
-        names for the system backend, and passed as-is to Kokoro for
-        the Kokoro backend.  A ``None`` or empty string resets the
-        hint.
-        """
-        self._voice_hint = hint or None
-
     def speak(self, text: str, voice_hint: Optional[str] = None) -> None:
-        """Queue a text utterance for synthesis.
-
-        The text is enqueued for the worker thread.  An optional
-        per-call voice hint may be supplied, overriding the global
-        hint for this utterance only.
-        """
-        if text:
-            self._queue.put((text, voice_hint))
+        self._q.put((text, voice_hint))
 
     def stop(self) -> None:
-        """Stop the worker thread and flush remaining utterances."""
-        self._stop_event.set()
+        self._stop.set()
         try:
-            self._queue.put_nowait(("", None))
+            self._q.put_nowait(("", None))
         except Exception:
             pass
-        if self._worker_thread.is_alive():
-            self._worker_thread.join(timeout=1.0)
+        if self._th.is_alive():
+            self._th.join(timeout=1.0)
 
-    # ------------------------------------------------------------------
-    # Worker thread
-    # ------------------------------------------------------------------
+    # ---------------- worker ----------------
     def _worker(self) -> None:
-        while not self._stop_event.is_set():
+        while not self._stop.is_set():
             try:
-                text, hint = self._queue.get(timeout=0.1)
+                text, hint = self._q.get(timeout=0.1)
             except queue.Empty:
                 continue
             if not text:
                 continue
-            # Determine voice hint: per-call overrides global
-            voice_hint = hint or self._voice_hint
-            # Attempt synthesis with selected backend
-            if self._backend == TTSBackend.KOKORO and self._try_kokoro(text, voice_hint):
-                continue
-            # Fallback to system TTS
-            self._system_say(text, voice_hint)
+            try:
+                if self._backend == TTSBackend.KOKORO82M and self._try_kokoro82m(text, hint):
+                    continue
+                self._system_say(text, hint)
+            except Exception as e:
+                print(f"[TTS] speak error: {e!r}")
+                try:
+                    self._system_say(text, hint)
+                except Exception as e2:
+                    print(f"[TTS] system fallback failed: {e2!r}")
 
-    # ------------------------------------------------------------------
-    # Synthesis backends
-    # ------------------------------------------------------------------
+    # ---------------- backends ----------------
     def _system_say(self, text: str, hint: Optional[str]) -> None:
-        """Speak using pyttsx3 with a fresh engine per utterance."""
-        if not pyttsx3:
-            print("[TTS] pyttsx3 not installed; cannot use system TTS", file=sys.stderr)
-            return
-        # Create a new engine for each utterance; this avoids freezes on Windows
+        if pyttsx3 is None:
+            raise RuntimeError("pyttsx3 not installed")
+        eng = pyttsx3.init()
         try:
-            engine = pyttsx3.init()
-        except Exception as e:
-            print(f"[TTS] Failed to init pyttsx3: {e}", file=sys.stderr)
-            return
-        # Apply voice hint if provided
-        try:
-            if hint:
-                want = hint.lower()
-                for v in engine.getProperty("voices"):
-                    name = getattr(v, "name", "").lower()
-                    if want in name:
-                        engine.setProperty("voice", v.id)
-                        break
-        except Exception:
-            pass
-        # Speak
-        try:
-            engine.say(text)
-            engine.runAndWait()
-        except Exception as e:
-            print(f"[TTS] pyttsx3 speak failed: {e}", file=sys.stderr)
+            want = (hint or self._voice_hint or "").lower()
+            if want:
+                try:
+                    for v in eng.getProperty("voices"):
+                        nm = getattr(v, "name", "").lower()
+                        if want in nm:
+                            eng.setProperty("voice", v.id)
+                            break
+                except Exception:
+                    pass
+            eng.say(text)
+            eng.runAndWait()
         finally:
             try:
-                engine.stop()
+                eng.stop()
             except Exception:
                 pass
 
-    def _try_kokoro(self, text: str, hint: Optional[str]) -> bool:
-        """Attempt to synthesise and play audio with Kokoro.
+    def _ensure_kokoro_ready(self) -> None:
+        if not _KOKORO_OK:
+            raise RuntimeError(f"kokoro import failed: {_KOKORO_ERR!r}")
+        if sd is None:
+            raise RuntimeError("sounddevice not installed")
+        if np is None:
+            raise RuntimeError("numpy not installed")
+        if self._pipe is not None:
+            return
 
-        Returns ``True`` on success; if any error occurs or Kokoro is
-        unavailable, returns ``False``, signalling the caller to use
-        system TTS instead.
-        """
-        if not _KOKORO_IMPORTED or _Kokoro is None:
+        voices_dir = os.environ.get("KOKORO82M_VOICES_DIR", "")
+        if not voices_dir or not os.path.isdir(voices_dir):
+            raise FileNotFoundError("Set KOKORO82M_VOICES_DIR to a folder with *.pt voices")
+        self._voices_dir = voices_dir
+
+        # Let KPipeline build the correct model internally (no manual KModel)
+        print(f"[TTS] Initializing Kokoro‑82M pipeline…")
+        self._pipe = KPipeline(lang_code=self._lang_code)
+        print(f"[TTS] Kokoro‑82M ready; voices: {self._voices_dir}")
+
+    def _find_voice(self, hint: Optional[str]) -> Tuple[str, str]:
+        assert self._voices_dir is not None
+        want = (hint or self._voice_hint)
+        if want:
+            cand = os.path.join(self._voices_dir, f"{want}.pt")
+            if os.path.isfile(cand):
+                return want, cand
+        for fn in sorted(os.listdir(self._voices_dir)):
+            if fn.lower().endswith(".pt"):
+                return os.path.splitext(fn)[0], os.path.join(self._voices_dir, fn)
+        raise FileNotFoundError("No .pt voices found in KOKORO82M_VOICES_DIR")
+
+    def _try_kokoro82m(self, text: str, hint: Optional[str]) -> bool:
+        try:
+            self._ensure_kokoro_ready()
+        except Exception as e:
+            print(f"[TTS] Kokoro‑82M init failed: {e}; using system.")
             return False
-        model_path = os.environ.get("KOKORO_MODEL_PATH")
-        voices_path = os.environ.get("KOKORO_VOICES_PATH")
-        if not model_path or not voices_path:
-            return False
-        if not os.path.isfile(model_path) or not os.path.isfile(voices_path):
-            return False
-        if sd is None or np is None:
-            return False
-        # Instantiate Kokoro for this utterance.  Some Kokoro voice packs
-        # contain pickled numpy arrays and require the ``allow_pickle`` flag.
-        def _construct_kokoro() -> object:
-            """Try to instantiate Kokoro, patching numpy.load to allow_pickle if needed."""
+
+        assert self._pipe is not None and self._voices_dir is not None
+        name, path = self._find_voice(hint)
+
+        # Load local voice tensor
+        try:
             try:
-                # Try positional arguments first (typical for kokoro-onnx)
-                return _Kokoro(model_path, voices_path)  # type: ignore[arg-type]
+                voice_tensor = torch.load(path, weights_only=True)
             except TypeError:
-                # Fall back to keyword arguments
-                return _Kokoro(model_path=model_path, voices_path=voices_path)  # type: ignore[arg-type]
-            except Exception as e:
-                # If the error mentions pickled data, retry with allow_pickle=True
-                msg = str(e).lower()
-                if "allow_pickle" in msg or "pickled" in msg or "pickle" in msg:
-                    try:
-                        import numpy as _np
-                        _orig_load = _np.load
-                        def _patched_load(file, *args, **kwargs):
-                            kwargs.setdefault("allow_pickle", True)
-                            return _orig_load(file, *args, **kwargs)
-                        _np.load = _patched_load  # temporarily override
-                        try:
-                            try:
-                                return _Kokoro(model_path, voices_path)  # type: ignore[arg-type]
-                            except TypeError:
-                                return _Kokoro(model_path=model_path, voices_path=voices_path)  # type: ignore[arg-type]
-                        finally:
-                            _np.load = _orig_load
-                    except Exception:
-                        pass
-                # Re-raise other errors
-                raise
+                voice_tensor = torch.load(path)
+        except Exception as e:
+            print(f"[TTS] Kokoro‑82M voice load failed: {e}; using system.")
+            return False
 
+        # Run pipeline and play the concatenated audio
         try:
-            kokoro = _construct_kokoro()
+            chunks: List[np.ndarray] = []
+            for _, _, audio in self._pipe(text, voice=voice_tensor, speed=self._speed):
+                if isinstance(audio, (list, tuple)):
+                    audio = np.asarray(audio, dtype=np.float32)
+                chunks.append(audio)
+            if not chunks:
+                return False
+            wav = chunks[0] if len(chunks) == 1 else np.concatenate(chunks, axis=0)
+            import sounddevice as sd  # ensure default device resolves at call time
+            sd.play(wav, samplerate=24000, blocking=True)
         except Exception as e:
-            print(f"[TTS] Kokoro init failed: {e}; using system.", file=sys.stderr)
+            print(f"[TTS] Kokoro‑82M synthesis failed: {e!r}; using system.")
             return False
-        voice = (hint or self._voice_hint or "am_adam")
-        # Synthesise
-        try:
-            if hasattr(kokoro, "tts"):
-                audio = kokoro.tts(text, voice=voice)  # type: ignore[attr-defined]
-            else:
-                audio = kokoro.infer(text, voice=voice)  # type: ignore[attr-defined]
-        except Exception as e:
-            print(f"[TTS] Kokoro synthesis failed: {e}", file=sys.stderr)
-            return False
-        # Convert to numpy array and play
-        try:
-            if not isinstance(audio, np.ndarray):
-                audio = np.asarray(audio, dtype=np.float32)
-            if audio.dtype != np.float32:
-                audio = audio.astype(np.float32)
-            sd.play(audio, samplerate=24000, blocking=True)
-        except Exception as e:
-            print(f"[TTS] Audio playback failed: {e}", file=sys.stderr)
-            return False
-        # Success
+
+        print(f"[TTS] Kokoro‑82M voice applied: {name}")
         return True
-
-
-class TextToSpeech:
-    """Compatibility shim for code expecting a ``TextToSpeech`` class.
-
-    Older code may instantiate this class; internally it delegates
-    operations to a singleton :class:`TTSManager`.  New code should
-    use :class:`TTSManager` directly.
-    """
-    _manager: Optional[TTSManager] = None
-
-    def __init__(self) -> None:
-        if TextToSpeech._manager is None:
-            TextToSpeech._manager = TTSManager()
-        self._mgr = TextToSpeech._manager
-
-    def get_voices(self) -> List[Tuple[str, str]]:
-        names = self._mgr.list_voices()
-        return [(name, name) for name in names]
-
-    def set_voice(self, voice_id: str) -> None:
-        self._mgr.set_voice_by_hint(voice_id)
-
-    def speak(self, text: str) -> None:
-        self._mgr.speak(text)

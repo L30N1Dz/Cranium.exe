@@ -178,11 +178,20 @@ class STTWorker(QThread):
         # sentence.
         combined = text.strip()
         if combined:
-            import re
-            pattern = rf"^\s*{re.escape(self.hotword)}\s*[:,\-]?\s*"
-            cleaned = re.sub(pattern, "", combined, flags=re.IGNORECASE)
-            if cleaned.strip():
-                self.detected_sentence.emit(cleaned.strip())
+            try:
+                import re
+                pattern = rf"^\s*{re.escape(self.hotword)}\s*[:,\-]?\s*"
+                cleaned = re.sub(pattern, "", combined, flags=re.IGNORECASE)
+            except Exception:
+                # Fallback: simple replace of the first occurrence
+                cleaned = combined
+                lower_cleaned = cleaned.lower()
+                idx = lower_cleaned.find(self.hotword)
+                if idx != -1:
+                    cleaned = cleaned[idx + len(self.hotword):].strip()
+            cleaned = cleaned.strip()
+            if cleaned:
+                self.detected_sentence.emit(cleaned)
         # Reset for next hotword
         self._buf.clear()
         self._heard_hotword = False

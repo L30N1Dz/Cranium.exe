@@ -124,16 +124,12 @@ class MainWindow(QMainWindow):
         # containing "am_adam" in its name, falling back to the first ``.bin``
         # file if none match.
         try:
-            # Determine base directory relative to this file
-            kokoro_dir = os.path.join(os.path.dirname(__file__), "models", "kokoro")
-            os.environ["KOKORO_MODEL_PATH"]  = os.path.join(kokoro_dir, "model.onnx")
-            # Pick the first .bin file (prefer one containing "am_adam")
-            bins = [f for f in os.listdir(kokoro_dir) if f.lower().endswith(".bin")]
-            bins.sort()
-            pref = [b for b in bins if "am_adam" in b.lower()]
-            chosen = pref[0] if pref else (bins[0] if bins else None)
-            if chosen:
-                os.environ["KOKORO_VOICES_PATH"] = os.path.join(kokoro_dir, chosen)
+            # Point KOKORO82M to your local model and voices
+            kokoro82m_dir = os.path.join(os.path.dirname(__file__), "models", "kokoro82m")
+            os.environ["KOKORO82M_VOICES_DIR"] = os.path.join(kokoro82m_dir, "voices")
+            # Optional for offline runs after first cache:
+            # os.environ["HF_HOME"] = r"C:\Users\L30N1D\Documents\Repo-Raand\Cranium.exe\.hf_cache"
+            # os.environ["HF_HUB_OFFLINE"] = "1"
 
         except Exception:
             # If any error occurs (e.g., missing os), simply ignore and let
@@ -145,7 +141,7 @@ class MainWindow(QMainWindow):
         self.tts_enable_cb.setChecked(False)
         # Backend selector: system or kokoro
         self.tts_backend_box = QComboBox()
-        self.tts_backend_box.addItems(["system", "kokoro"])
+        self.tts_backend_box.addItems(["system", "kokoro82m"])
         # Voice selector
         self.voice_box = QComboBox()
         # Create TTS manager instance (default system backend)
