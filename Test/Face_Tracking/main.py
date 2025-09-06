@@ -20,12 +20,14 @@ from PySide6.QtWidgets import (
     QComboBox, QMessageBox
 )
 from PySide6.QtCore import Qt, QTimer, Slot
-from PySide6.QtGui import QPixmap, QImage
+from PySide6.QtGui import QPixmap, QImage, QTextCursor
 
 from webcam import VideoWorker
 from llm_client import OllamaClient
 from uart import SerialManager
 from utils import map_range_clamped
+from tts import TextToSpeech
+from stt import STTWorker, list_input_devices
 
 
 class MainWindow(QMainWindow):
@@ -76,6 +78,11 @@ class MainWindow(QMainWindow):
         # Model selection
         self.model_edit = QLineEdit("llava")
         self.model_edit.setToolTip("Name of the vision model hosted in Ollama, e.g. 'llava', 'llava:13b', 'qwen2.5vl:7b'")
+        # Detector selection
+        self.detector_combo = QComboBox()
+        self.detector_combo.addItems(["FaceDetection", "FaceMesh"])
+        self.detector_combo.setToolTip("Face detection algorithm: FaceDetection (bounding box) or FaceMesh (landmarks)")
+        self.detector_combo.currentIndexChanged.connect(self.on_detector_changed)
         # Only prompt on user
         self.only_on_prompt_cb = QCheckBox("Only prompt on user message")
         self.only_on_prompt_cb.setChecked(True)
@@ -107,18 +114,61 @@ class MainWindow(QMainWindow):
         self.invert_x_cb = QCheckBox("Invert X")
         self.invert_y_cb = QCheckBox("Invert Y")
 
+        # ----- Text-to-speech (TTS) and speech-to-text (STT) controls -----
+        # TTS
+        self.tts_enable_cb = QCheckBox("Enable TTS (speak responses)")
+        self.tts_enable_cb.setChecked(False)
+        self.voice_box = QComboBox()
+        # Initialize TTS engine and populate voices
+        self.tts = TextToSpeech()
+        try:
+            voices = self.tts.get_voices()
+            for vid, vname in voices:
+                self.voice_box.addItem(vname, vid)
+            # Set default to first voice
+            if voices:
+                self.voice_box.setCurrentIndex(0)
+                self.tts.set_voice(voices[0][0])
+        except Exception:
+            # If voice listing fails, disable TTS controls
+            self.tts_enable_cb.setEnabled(False)
+            self.voice_box.setEnabled(False)
+        # Connect voice selection change
+        self.voice_box.currentIndexChanged.connect(self.on_voice_changed)
+        # STT
+        self.stt_enable_cb = QCheckBox("Enable STT (hotword)")
+        self.stt_enable_cb.setChecked(False)
+        self.hotword_edit = QLineEdit("cranium")
+        self.hotword_edit.setToolTip("Keyword to trigger speech-to-text transcription")
+        self.mic_box = QComboBox()
+        # Populate microphones
+        self.refresh_mics()
+        # Connect STT toggle
+        self.stt_enable_cb.stateChanged.connect(self.on_stt_toggle)
+        self.stt_worker: Optional[STTWorker] = None
+        # Storage for accumulating assistant response for TTS
+        self.current_response_text: str = ""
+        # Flag to indicate whether the current assistant reply has started streaming
+        self._stream_started: bool = False
+
         # Layout for settings
         ctrl_layout = QGridLayout()
         row = 0
+        # Model and detector selection
         ctrl_layout.addWidget(QLabel("Model:"), row, 0)
         ctrl_layout.addWidget(self.model_edit, row, 1, 1, 2)
         row += 1
+        ctrl_layout.addWidget(QLabel("Detector:"), row, 0)
+        ctrl_layout.addWidget(self.detector_combo, row, 1, 1, 2)
+        row += 1
+        # Prompting options
         ctrl_layout.addWidget(self.only_on_prompt_cb, row, 0, 1, 3)
         row += 1
         ctrl_layout.addWidget(self.auto_enable_cb, row, 0)
         ctrl_layout.addWidget(QLabel("Interval:"), row, 1)
         ctrl_layout.addWidget(self.auto_interval_ms, row, 2)
         row += 1
+        # Serial settings
         ctrl_layout.addWidget(QLabel("Port:"), row, 0)
         ctrl_layout.addWidget(self.port_box, row, 1)
         ctrl_layout.addWidget(self.connect_btn, row, 2)
@@ -141,6 +191,27 @@ class MainWindow(QMainWindow):
         right_col = QVBoxLayout()
         right_col.addWidget(chat_group, 3)
         right_col.addWidget(ctrl_group, 1)
+        # Audio & Speech group
+        speech_layout = QGridLayout()
+        row_s = 0
+        # TTS controls
+        speech_layout.addWidget(self.tts_enable_cb, row_s, 0, 1, 2)
+        row_s += 1
+        speech_layout.addWidget(QLabel("Voice:"), row_s, 0)
+        speech_layout.addWidget(self.voice_box, row_s, 1)
+        row_s += 1
+        # STT controls
+        speech_layout.addWidget(self.stt_enable_cb, row_s, 0, 1, 2)
+        row_s += 1
+        speech_layout.addWidget(QLabel("Microphone:"), row_s, 0)
+        speech_layout.addWidget(self.mic_box, row_s, 1)
+        row_s += 1
+        speech_layout.addWidget(QLabel("Hotword:"), row_s, 0)
+        speech_layout.addWidget(self.hotword_edit, row_s, 1)
+        row_s += 1
+        speech_group = QGroupBox("Audio & Speech")
+        speech_group.setLayout(speech_layout)
+        right_col.addWidget(speech_group, 1)
 
         main_layout = QHBoxLayout()
         main_layout.addLayout(left_col, 3)
@@ -250,6 +321,9 @@ class MainWindow(QMainWindow):
             return
         # Compose generic auto message
         self.append_chat("system", f"[auto] Analyzing frame...")
+        # Reset the assistant response accumulator and streaming flag for new response
+        self.current_response_text = ""
+        self._stream_started = False
         self.ollama.set_model(self.model_edit.text().strip())
         self.ollama.send_frame_with_prompt(self.last_frame_qimage, self.auto_prompt)
 
@@ -267,6 +341,9 @@ class MainWindow(QMainWindow):
         self.append_chat("user", text)
         # Update model if changed
         self.ollama.set_model(self.model_edit.text().strip())
+        # Reset assistant response accumulator and streaming flag
+        self.current_response_text = ""
+        self._stream_started = False
         # Send message with frame
         self.ollama.send_user_message_with_frame(text, self.last_frame_qimage)
         self.chat_input.clear()
@@ -341,21 +418,141 @@ class MainWindow(QMainWindow):
         self.port_box.clear()
         self.port_box.addItems(ports)
 
+    def refresh_mics(self) -> None:
+        """Populate microphone device list for STT."""
+        try:
+            devices = list_input_devices()
+        except Exception:
+            devices = []
+        if not devices:
+            # Provide a generic default if enumeration fails
+            devices = [(-1, "Default")]  # -1 lets sounddevice choose default
+        self.mic_box.clear()
+        for idx, name in devices:
+            self.mic_box.addItem(name, idx)
+
+    @Slot()
+    def on_detector_changed(self) -> None:
+        """Change face detector when user selects a different option."""
+        text = self.detector_combo.currentText()
+        if text.lower() == "facemesh":
+            dtype = "face_mesh"
+        else:
+            dtype = "face_detection"
+        try:
+            self.video.set_detector_type(dtype)
+        except Exception as exc:
+            self.append_chat("system", f"[error] Failed to set detector: {exc}")
+
+    @Slot()
+    def on_voice_changed(self) -> None:
+        """Handle change of selected TTS voice."""
+        voice_id = self.voice_box.currentData()
+        if voice_id:
+            try:
+                self.tts.set_voice(voice_id)
+            except Exception:
+                pass
+
+    @Slot()
+    def on_stt_toggle(self) -> None:
+        """Enable or disable the speech-to-text worker based on checkbox."""
+        if self.stt_enable_cb.isChecked():
+            self.start_stt()
+        else:
+            self.stop_stt()
+
+    def start_stt(self) -> None:
+        """Create and start the STT worker."""
+        if self.stt_worker is not None:
+            return
+        # Determine device index
+        device_idx = self.mic_box.currentData()
+        try:
+            device_index = int(device_idx) if device_idx is not None else None
+        except Exception:
+            device_index = None
+        hotword = self.hotword_edit.text().strip().lower() or "cranium"
+        try:
+            worker = STTWorker(hotword=hotword, device_index=device_index)
+        except Exception as exc:
+            self.append_chat("system", f"[error] Failed to start STT: {exc}")
+            return
+        worker.recognized.connect(self.on_stt_result)
+        self.stt_worker = worker
+        worker.start()
+        self.append_chat("system", f"[stt] Listening for '{hotword}'...")
+
+    def stop_stt(self) -> None:
+        """Stop and clean up the STT worker."""
+        if self.stt_worker:
+            try:
+                self.stt_worker.stop()
+                self.stt_worker.wait()
+            except Exception:
+                pass
+            self.stt_worker = None
+            self.append_chat("system", "[stt] Stopped listening")
+
+    @Slot(str)
+    def on_stt_result(self, text: str) -> None:
+        """Handle recognized speech and forward to LLM if appropriate."""
+        query = text.strip()
+        if not query:
+            return
+        # Append to chat as user message
+        self.append_chat("user", query)
+        if self.last_frame_qimage is None:
+            self.append_chat("system", "[stt] No video frame available to send to model.")
+            return
+        if self.ollama.is_busy:
+            self.append_chat("system", "[stt] Model is busy; ignoring transcription.")
+            return
+        # Ensure model selection is up-to-date
+        self.ollama.set_model(self.model_edit.text().strip())
+        # Reset assistant response accumulator and streaming flag
+        self.current_response_text = ""
+        self._stream_started = False
+        self.ollama.send_user_message_with_frame(query, self.last_frame_qimage)
+
     # LLM callbacks
     def on_llm_stream(self, delta_text: str) -> None:
-        """Handle streaming deltas from the LLM. Append to chat log."""
+        """Handle streaming deltas from the LLM. Append to chat log with separation."""
         if not delta_text:
             return
-        # Insert incremental text to the last assistant message
-        cursor = self.chat_log.textCursor()
-        cursor.movePosition(cursor.End)
-        cursor.insertText(delta_text)
-        self.chat_log.setTextCursor(cursor)
+        # On the first delta of a new assistant response, insert a header on its own line
+        if not self._stream_started:
+            # Create a new paragraph with Assistant label
+            self.chat_log.append("<b><span style='color:#a6e3a1'>Assistant:</span></b>")
+            self._stream_started = True
+        # Append the new delta to the current assistant message
+        self.chat_log.moveCursor(QTextCursor.End)
+        self.chat_log.insertPlainText(delta_text)
+        self.chat_log.moveCursor(QTextCursor.End)
+        # Accumulate assistant response for TTS
+        self.current_response_text += delta_text
 
     def on_llm_done(self) -> None:
         """Mark the end of the LLM response."""
-        # Insert a newline for separation
+        # Insert a newline for separation before future messages
         self.chat_log.append("")
+        # Speak out the assistant response if TTS is enabled
+        if self.tts_enable_cb.isChecked() and self.current_response_text.strip():
+            # Set selected voice
+            try:
+                voice_id = self.voice_box.currentData()
+                if voice_id:
+                    self.tts.set_voice(voice_id)
+            except Exception:
+                pass
+            # Speak asynchronously
+            try:
+                self.tts.speak(self.current_response_text.strip())
+            except Exception:
+                pass
+        # Reset stream state for the next response
+        self._stream_started = False
+        self.current_response_text = ""
 
     def on_llm_error(self, msg: str) -> None:
         self.append_chat("system", f"[error] {msg}")
@@ -372,6 +569,11 @@ class MainWindow(QMainWindow):
             pass
         try:
             self.ollama.close()
+        except Exception:
+            pass
+        # Stop STT if running
+        try:
+            self.stop_stt()
         except Exception:
             pass
         return super().closeEvent(event)
