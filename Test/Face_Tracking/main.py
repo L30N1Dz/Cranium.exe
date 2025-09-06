@@ -26,8 +26,8 @@ from webcam import VideoWorker
 from llm_client import OllamaClient
 from uart import SerialManager
 from utils import map_range_clamped
-from tts import TextToSpeech
-from stt import STTWorker, list_input_devices
+from tts import TTSManager, TTSBackend
+from stt import STTWorker
 
 
 class MainWindow(QMainWindow):
@@ -115,36 +115,62 @@ class MainWindow(QMainWindow):
         self.invert_y_cb = QCheckBox("Invert Y")
 
         # ----- Text-to-speech (TTS) and speech-to-text (STT) controls -----
-        # TTS
+        # Before constructing the TTS manager, configure the Kokoro model paths.
+        # The user may place the Kokoro ONNX model and voices files in a local
+        # ``models/kokoro`` folder relative to the script. If these files exist,
+        # set environment variables so the ``kokoro`` Python library can find
+        # them. The model is expected to be named ``model.onnx`` and voices
+        # files have a ``.bin`` extension. The code will prefer a voice file
+        # containing "am_adam" in its name, falling back to the first ``.bin``
+        # file if none match.
+        try:
+            # Determine base directory relative to this file
+            kokoro_dir = os.path.join(os.path.dirname(__file__), "models", "kokoro")
+            os.environ["KOKORO_MODEL_PATH"]  = os.path.join(kokoro_dir, "model.onnx")
+            # Pick the first .bin file (prefer one containing "am_adam")
+            bins = [f for f in os.listdir(kokoro_dir) if f.lower().endswith(".bin")]
+            bins.sort()
+            pref = [b for b in bins if "am_adam" in b.lower()]
+            chosen = pref[0] if pref else (bins[0] if bins else None)
+            if chosen:
+                os.environ["KOKORO_VOICES_PATH"] = os.path.join(kokoro_dir, chosen)
+
+        except Exception:
+            # If any error occurs (e.g., missing os), simply ignore and let
+            # kokoro fallback to its defaults.
+            pass
+
+        # TTS controls: toggle, backend selection and voice selection
         self.tts_enable_cb = QCheckBox("Enable TTS (speak responses)")
         self.tts_enable_cb.setChecked(False)
+        # Backend selector: system or kokoro
+        self.tts_backend_box = QComboBox()
+        self.tts_backend_box.addItems(["system", "kokoro"])
+        # Voice selector
         self.voice_box = QComboBox()
-        # Initialize TTS engine and populate voices
-        self.tts = TextToSpeech()
+        # Create TTS manager instance (default system backend)
+        self.tts = TTSManager()
+        # Populate voice list for default backend
         try:
-            voices = self.tts.get_voices()
-            for vid, vname in voices:
-                self.voice_box.addItem(vname, vid)
-            # Set default to first voice
-            if voices:
-                self.voice_box.setCurrentIndex(0)
-                self.tts.set_voice(voices[0][0])
+            for name in self.tts.list_voices():
+                self.voice_box.addItem(name)
         except Exception:
             # If voice listing fails, disable TTS controls
             self.tts_enable_cb.setEnabled(False)
             self.voice_box.setEnabled(False)
-        # Connect voice selection change
-        self.voice_box.currentIndexChanged.connect(self.on_voice_changed)
-        # STT
+        # Connect backend and voice selectors
+        self.tts_backend_box.currentTextChanged.connect(self.on_tts_backend_changed)
+        self.voice_box.currentTextChanged.connect(self.on_voice_changed)
+        # Speech-to-text controls
         self.stt_enable_cb = QCheckBox("Enable STT (hotword)")
         self.stt_enable_cb.setChecked(False)
         self.hotword_edit = QLineEdit("cranium")
         self.hotword_edit.setToolTip("Keyword to trigger speech-to-text transcription")
         self.mic_box = QComboBox()
-        # Populate microphones
-        self.refresh_mics()
-        # Connect STT toggle
-        self.stt_enable_cb.stateChanged.connect(self.on_stt_toggle)
+        # Populate microphones (unique list)
+        self._fill_mics()
+        # Connect STT toggle: pass state
+        self.stt_enable_cb.toggled.connect(self.on_stt_toggle)
         self.stt_worker: Optional[STTWorker] = None
         # Storage for accumulating assistant response for TTS
         self.current_response_text: str = ""
@@ -197,6 +223,11 @@ class MainWindow(QMainWindow):
         # TTS controls
         speech_layout.addWidget(self.tts_enable_cb, row_s, 0, 1, 2)
         row_s += 1
+        # Backend selection row
+        speech_layout.addWidget(QLabel("TTS Backend:"), row_s, 0)
+        speech_layout.addWidget(self.tts_backend_box, row_s, 1)
+        row_s += 1
+        # Voice selection row
         speech_layout.addWidget(QLabel("Voice:"), row_s, 0)
         speech_layout.addWidget(self.voice_box, row_s, 1)
         row_s += 1
@@ -418,18 +449,40 @@ class MainWindow(QMainWindow):
         self.port_box.clear()
         self.port_box.addItems(ports)
 
-    def refresh_mics(self) -> None:
-        """Populate microphone device list for STT."""
+
+    def _fill_mics(self) -> None:
+        """Populate the microphone list with all available input devices.
+
+        This implementation enumerates every input-capable device reported by
+        ``sounddevice.query_devices()`` and presents it to the user. Unlike
+        earlier versions, it does not filter out loopback devices or skip
+        duplicates; some audio interfaces expose the same physical device via
+        multiple host APIs (e.g. MME, WASAPI, DirectSound on Windows). Showing
+        all devices ensures users can select the one that works best on their
+        system. If enumeration fails or yields no devices, a single default
+        option is shown.
+        """
         try:
-            devices = list_input_devices()
+            import sounddevice as sd
+            devs = sd.query_devices()
+            items: list[tuple[Optional[int], str]] = []
+            for i, d in enumerate(devs):
+                # We only list devices with at least one input channel
+                if d.get('max_input_channels', 0) <= 0:
+                    continue
+                name = d.get('name') or f"Device {i}"
+                items.append((i, name))
         except Exception:
-            devices = []
-        if not devices:
-            # Provide a generic default if enumeration fails
-            devices = [(-1, "Default")]  # -1 lets sounddevice choose default
+            items = []
+        if not items:
+            items = [(None, "Default microphone")]
         self.mic_box.clear()
-        for idx, name in devices:
-            self.mic_box.addItem(name, idx)
+        for idx, name in items:
+            if idx is None:
+                self.mic_box.addItem(name)
+            else:
+                # Display index: name for clarity
+                self.mic_box.addItem(f"{idx}: {name}")
 
     @Slot()
     def on_detector_changed(self) -> None:
@@ -447,73 +500,109 @@ class MainWindow(QMainWindow):
     @Slot()
     def on_voice_changed(self) -> None:
         """Handle change of selected TTS voice."""
-        voice_id = self.voice_box.currentData()
-        if voice_id:
+        # Use the visible name as a hint for voice selection
+        try:
+            self.tts.set_voice_by_hint(self.voice_box.currentText().strip())
+        except Exception:
+            pass
+
+    @Slot(str)
+    def on_tts_backend_changed(self, name: str) -> None:
+        """Handle switching of TTS backend."""
+        try:
+            self.tts.set_backend(name)
+        except Exception as e:
             try:
-                self.tts.set_voice(voice_id)
+                QMessageBox.warning(self, "TTS backend", f"Failed to switch backend: {e}")
             except Exception:
                 pass
+        # Refresh available voices for the new backend
+        self.voice_box.blockSignals(True)
+        self.voice_box.clear()
+        self.voice_box.addItems(self.tts.list_voices())
+        self.voice_box.blockSignals(False)
 
-    @Slot()
-    def on_stt_toggle(self) -> None:
-        """Enable or disable the speech-to-text worker based on checkbox."""
-        if self.stt_enable_cb.isChecked():
-            self.start_stt()
+    @Slot(bool)
+    def on_stt_toggle(self, enabled: bool) -> None:
+        """Enable or disable the speech-to-text worker based on toggle state."""
+        if enabled:
+            # Parse selected microphone index (format: "idx: name")
+            sel = self.mic_box.currentText().strip()
+            mic_index = None
+            if ":" in sel:
+                try:
+                    mic_index = int(sel.split(":", 1)[0])
+                except Exception:
+                    mic_index = None
+            # Read hotword
+            hotword = self.hotword_edit.text().strip().lower() or "cranium"
+            # Create and start STT worker
+            worker = STTWorker(device_index=mic_index, hotword=hotword)
+            worker.detected_sentence.connect(self.on_hotword_sentence)
+            worker.error.connect(self.on_stt_error)
+            self.stt_worker = worker
+            worker.start()
+            self.append_chat("system", f"[stt] Listening for '{hotword}'…")
         else:
-            self.stop_stt()
+            if self.stt_worker:
+                try:
+                    self.stt_worker.stop()
+                    self.stt_worker.wait()
+                except Exception:
+                    pass
+                self.stt_worker = None
+                self.append_chat("system", "[stt] Stopped listening")
 
+    # The following methods are kept for backward compatibility but are no longer used.
+    # Speech-to-text functionality is handled by `on_stt_toggle`, `on_hotword_sentence`,
+    # and `on_stt_error`. These no-op placeholders prevent attribute errors if
+    # referenced elsewhere in legacy code or bindings.
     def start_stt(self) -> None:
-        """Create and start the STT worker."""
-        if self.stt_worker is not None:
-            return
-        # Determine device index
-        device_idx = self.mic_box.currentData()
-        try:
-            device_index = int(device_idx) if device_idx is not None else None
-        except Exception:
-            device_index = None
-        hotword = self.hotword_edit.text().strip().lower() or "cranium"
-        try:
-            worker = STTWorker(hotword=hotword, device_index=device_index)
-        except Exception as exc:
-            self.append_chat("system", f"[error] Failed to start STT: {exc}")
-            return
-        worker.recognized.connect(self.on_stt_result)
-        self.stt_worker = worker
-        worker.start()
-        self.append_chat("system", f"[stt] Listening for '{hotword}'...")
+        """Deprecated: STT startup is managed via on_stt_toggle."""
+        pass
 
     def stop_stt(self) -> None:
-        """Stop and clean up the STT worker."""
-        if self.stt_worker:
-            try:
-                self.stt_worker.stop()
-                self.stt_worker.wait()
-            except Exception:
-                pass
-            self.stt_worker = None
-            self.append_chat("system", "[stt] Stopped listening")
+        """Deprecated: STT shutdown is managed via on_stt_toggle."""
+        pass
 
     @Slot(str)
     def on_stt_result(self, text: str) -> None:
-        """Handle recognized speech and forward to LLM if appropriate."""
-        query = text.strip()
-        if not query:
+        """Deprecated: STT result handling is performed by on_hotword_sentence."""
+        pass
+
+    @Slot(str)
+    def on_hotword_sentence(self, sentence: str) -> None:
+        """Handle a completed sentence detected after the hotword."""
+        text = (sentence or "").strip()
+        if not text:
             return
-        # Append to chat as user message
-        self.append_chat("user", query)
+        # Append user message to chat
+        self.append_chat("user", text)
+        # Check for valid frame
         if self.last_frame_qimage is None:
             self.append_chat("system", "[stt] No video frame available to send to model.")
             return
+        # Check if model is busy
         if self.ollama.is_busy:
             self.append_chat("system", "[stt] Model is busy; ignoring transcription.")
             return
-        # Ensure model selection is up-to-date
+        # Set model and reset streaming state
         self.ollama.set_model(self.model_edit.text().strip())
-        # Reset assistant response accumulator and streaming flag
         self.current_response_text = ""
         self._stream_started = False
-        self.ollama.send_user_message_with_frame(query, self.last_frame_qimage)
+        # Send to model
+        self.ollama.send_user_message_with_frame(text, self.last_frame_qimage)
+
+    @Slot(str)
+    def on_stt_error(self, message: str) -> None:
+        """Display STT errors to the user."""
+        msg = message or "Unknown STT error"
+        # Show in chat and pop up a message box
+        self.append_chat("system", f"[stt-error] {msg}")
+        try:
+            QMessageBox.warning(self, "STT Error", msg)
+        except Exception:
+            pass
 
     # LLM callbacks
     def on_llm_stream(self, delta_text: str) -> None:
@@ -538,14 +627,7 @@ class MainWindow(QMainWindow):
         self.chat_log.append("")
         # Speak out the assistant response if TTS is enabled
         if self.tts_enable_cb.isChecked() and self.current_response_text.strip():
-            # Set selected voice
-            try:
-                voice_id = self.voice_box.currentData()
-                if voice_id:
-                    self.tts.set_voice(voice_id)
-            except Exception:
-                pass
-            # Speak asynchronously
+            # Speak asynchronously (voice hint already applied via selection)
             try:
                 self.tts.speak(self.current_response_text.strip())
             except Exception:
@@ -559,21 +641,33 @@ class MainWindow(QMainWindow):
 
     def closeEvent(self, event):
         # Clean up resources when closing the window
+        # Stop STT worker if active
+        try:
+            if self.stt_worker:
+                self.stt_worker.stop()
+                self.stt_worker.wait()
+                self.stt_worker = None
+        except Exception:
+            pass
+        # Stop TTS engine
+        try:
+            if hasattr(self.tts, 'stop'):
+                self.tts.stop()
+        except Exception:
+            pass
+        # Stop video worker
         try:
             self.video.stop()
         except Exception:
             pass
+        # Close serial port
         try:
             self.serial.close()
         except Exception:
             pass
+        # Close Ollama client
         try:
             self.ollama.close()
-        except Exception:
-            pass
-        # Stop STT if running
-        try:
-            self.stop_stt()
         except Exception:
             pass
         return super().closeEvent(event)
